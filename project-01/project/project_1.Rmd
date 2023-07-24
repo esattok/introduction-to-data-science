@@ -1,0 +1,347 @@
+---
+title: |
+  Spring 2023 \
+  GE 461 Introduction to Data Science
+# title: |
+pagetitle: GE 461 Introduction to Data Science
+papersize: a4paper
+author: Elifnur Alsaç - Esad İsmail Tök
+always_allow_html: true
+linkcolor: red
+output: 
+  bookdown::html_document2:
+    theme: readable
+    number_sections: false
+    code_folding: "hide"
+    toc: true
+  bookdown::pdf_document2:
+    number_sections: false
+
+link-citations: yes
+---
+
+
+```{r setup, include=FALSE}
+#| echo: false
+#| message: false
+library(magrittr)
+library(tidyverse)
+library(car)
+library(knitr)
+library(kableExtra)
+library(pander)
+library(corrplot)
+library(caret)
+library(ISLR2)
+library(GLMsData)
+library(leaps)
+opts_chunk$set(echo = TRUE)
+
+options(knitr.kable.NA =".") 
+kable_format <- if (is_html_output()) "html" else "latex"
+options(scipen = 999)
+```
+
+```{r}
+library(RSQLite)  ## if package is not on the computer, then install it only once using Tools > Install packages...
+con <- dbConnect(SQLite(), "../data/dodgers.sqlite") # read Modern Data Science with R for different ways to connect a database.
+
+#dbListTables(con)
+
+tbl(con, "events") %>% 
+  collect() %>% 
+  mutate(day_of_week = factor(day_of_week, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")),
+         month = factor(month, levels = c("APR","MAY","JUN","JUL","AUG","SEP","OCT"))) %>% 
+  mutate_if(is.character, factor) %>% 
+  mutate(temp = round((temp- 32)*5/9)) -> events
+```
+
+## Data exploration
+```{r}
+head(events)
+```
+```{r}
+sum(is.na(events))
+summary(events)
+```
+As we can see from the summary, we have 12 column and 81 row in our data. Also, we do not have any NA elements in our data set.
+```{r}
+events %>% names()
+```
+* We examined the relationship between "attend" and some parameters on the Dodgers data set. Among the ones we reviewed are temp, bobblehead, month, skies, and day_night. In the class, as we examined, there is a statistically significant relationship between temp and bobblehead and attendance. In addition, we can say that there is a significant relationship between month and the number of attendance. In this report, we will first try to understand the relationship between attendance and the parameters that we did not examine in the lesson, and then we will make the best model for attendance, and while doing this, we will proceed by analyzing the models. After that we will make our prediction within the 90% confidence interval.
+
+* Lets try to understand what is the relationship between "attendance" and "opponent".
+
+```{r collapse=TRUE}
+
+g1 <- ggplot(events, aes(x = attend, y = opponent, fill = opponent)) +
+   geom_boxplot() +
+   theme(axis.text.x=element_blank(),
+   axis.ticks.x=element_blank()) +
+   ggtitle("Attendance vs Opponent")
+
+g1
+
+
+```
+As we can see from the graph of Attendance vs Opponent, Angels has the maximum attendance when it is the opponent, and Braves has the minimum attendance. 
+
+* Lets try to understand whether "day" has affect on the "attend".
+
+```{r collapse=TRUE}
+
+g2 <- ggplot(events, aes(x = day, y = attend, fill = day)) +
+   geom_smooth() + geom_point()
+   ggtitle("Attendance vs Day")
+
+g2
+
+```
+Since the line is "almost" straight, we can say that "day" has no affect on the "attend".
+
+* We also need to see the affect of the "firework", "cap", and "shirt" in the dataset.
+
+```{r}
+events %>% 
+  count(bobblehead, fireworks, cap, shirt)
+```
+```{r}
+events %>% 
+  count(shirt, month) %>% 
+  pivot_wider(names_from = shirt, values_from = n) %>% 
+  pander(caption = "Number of games played in each month when shirt is given and not given")
+```
+```{r}
+events %>% 
+  count(cap, month) %>% 
+  pivot_wider(names_from = cap, values_from = n) %>% 
+  pander(caption = "Number of games played in each month when cap is given and not given")
+```
+```{r}
+events %>% 
+  count(fireworks, month) %>% 
+  pivot_wider(names_from = fireworks, values_from = n) %>% 
+  pander(caption = "Number of games played in each month when fireworks are used and not used")
+```
+```{r}
+events %>% 
+  count(bobblehead, month) %>% 
+  pivot_wider(names_from = bobblehead, values_from = n) %>% 
+  pander(caption = "Number of games played in each month when bobblehead is given and not given")
+```
+As we can see from the tables, in the month of october shirt, cap and bobblehead is not given and firework is not used. 
+Also in the month of september cap and bobblehead is not given.
+Also in the month of may cap and shirt is not given.
+
+* In the class, we understand that bobblehead is an important parameter, and we want to understand other parameters', such as cap, shirt and fireworks, affect on the attend. We can make some t.test to understand their effect. 
+
+```{r}
+t.test(x=events$attend[events$cap=="YES"],
+       y=events$attend[events$cap=="NO"])
+
+t.test(x=events$attend[events$shirt=="YES"],
+       y=events$attend[events$shirt=="NO"])
+
+t.test(x=events$attend[events$fireworks=="YES"],
+       y=events$attend[events$fireworks=="NO"])
+```
+We do not see a statistically significant difference between the average attendance of the games played when cap or shirt given and fireworks used. All of the parameter has big p-value(>0.05) which means they do not explain the attendance.
+
+* As we can see from the g3 density graph, most of our data come from month of october.
+```{r}
+# Change density plot fill colors by groups
+g3 <- ggplot(events, aes(x=attend, fill=month)) +
+  geom_density()
+g3 <-ggplot(events, aes(x=attend, fill=month)) +
+  geom_density(alpha=0.4) + 
+    labs(title="Density plot", 
+         subtitle="Attendance Grouped by Months",
+         x="Attendance",
+         fill="Months")
+g3
+
+```
+* We want to understand what is the correlation between the parameters. Our data set is mostly consist of categorical variables. Therefore, we plot a matrix which shows the chi-sq table. 
+```{r}
+library(lsr)
+suppressWarnings({
+# function to get chi square p value and Cramers V
+f = function(x,y) {
+    tbl = events %>% select(x,y) %>% table()
+    chisq_pval = round(chisq.test(tbl)$p.value, 4)
+    cramV = round(cramersV(tbl), 4) 
+    data.frame(x, y, chisq_pval, cramV) }
+
+# create unique combinations of column names
+# sorting will help getting a better plot (upper triangular)
+df_comb = data.frame(t(combn(sort(names(events)), 2)), stringsAsFactors = F)
+
+# apply function to each variable combination
+df_res = map2_df(df_comb$X1, df_comb$X2, f)
+
+# plot results
+df_res %>%
+  ggplot(aes(x,y,fill=chisq_pval))+
+  geom_tile()+
+  geom_text(aes(x,y,label=cramV))+
+  scale_fill_gradient(low="red", high="yellow")+
+  theme_classic()
+})
+
+```
+In the table above, we can see some correlation but indeed it may cause some misinterpreting the results since we have categorical values which have more than 2-levels and also some numeric variables. So we decided to use different method which is vif() test. Accordoing to vif() test, if the value is more than 5 than we can consider the collinearity of that variable. Collinearity tells us about a situation where two or more predictor variables are closely related to one another. This may cause a problem  because independent variables should be independent. If the degree of correlation between variables is high enough, it can cause problems when we fit the model and interpret the results. In this situation we looked the gvif() results to understand the situation. Since our data has categorical variables and we can not use vif() directly. If the result of gvif() is more than 5, than we may consider it as collinearity occurs for that predictor.
+```{r}
+vif_model<-lm(attend~.,events)
+car::vif(vif_model)
+```
+Here, there is no value bigger than 5, but fireworks gvif() value is close to 5, which is 4,75. So we need to be careful when we examine fireworks parameter.
+
+##Finding The Best Model
+
+At first, we can start with all variables for our model.
+```{r}
+lm1<-lm(attend~., data = events)
+lm1 %>% summary()
+
+```
+Since p value is small enough (<0.05) we can reject the null hypothesis. However, we can eliminate some predictors to build a better model. 
+```{r}
+plot(lm1)
+```
+We want to have our residuals to fitted the line. Also, from the second graph we want our standardized residuals to be as normal distributed as possible.
+
+
+Here we are investigating our predictors residual plots. It seem like temp need to be modified. To understand about how to modify we make power transformation. However it did not help much. We can observe it from the p-value.
+```{r}
+
+lm2<-lm(attend~temp+bobblehead+cap+shirt+skies+day+month+fireworks,data=events)
+
+residualPlots(lm2)
+
+pt <- powerTransform(cbind(attend, temp, bobblehead, cap, shirt, skies, day, month, fireworks)~1,data=events)
+summary(pt)
+
+```
+As we can see from summary, log(temp) seems not statistacally significant.
+```{r}
+lm3 <- lm(attend ~ .-temp+log(temp), data=events)
+summary(lm3)
+plot(lm3)
+```
+
+To make the temp fit the straight line, we need to mutate it to polynomial. We can take a square of temp.
+
+
+```{r}
+lm4 <- lm(attend ~ .-temp+poly(temp,2), data=events)
+summary(lm4)
+plot(lm4)
+```
+Here, we can move on with the modified poly(temp, 2) predictor since our Adjusted R-squared value is increased and p-value decreased.
+
+After that operation, as we observed from the lm4 model, we will try to remove some predictors step by step. We will choose removed predictors which are insignificant for our model.
+
+So we created mod5 and mod6. From the summary tables, we can say that there is not much difference on the models but we can comfortably say that both are better than our previous model, lm4, since our Adjusted R-squared value is increased and p-value is decreased. 
+```{r}
+mod5 <-lm(attend ~ .-temp+poly(temp,2)-day-skies-opponent, data=events)
+summary(mod5)
+
+mod6 <-lm(attend ~ .-temp+poly(temp,2)-day-skies-opponent-cap-shirt-day_night, data=events)
+summary(mod6)
+
+```
+Lets compare our models with anova.
+```{r}
+plot(mod5)
+plot(mod6)
+
+anova(mod6, mod5, lm4)
+AIC(mod6, mod5, lm4)
+BIC(mod6, mod5, lm4)
+```
+We can say that these 3 model are not different much and p-value is large so we we can continue with the small model.
+Also, lower AIC and BIC means better result and we can say that they are agrred on the same model which is mod6. AIC result is more important for us because we want to predict attendance for future games. Therefore, we will move on with mod6.
+
+To improve our model, we can check the interaction between predictors. As we discussed in the class, month and day_of_week interaction provide better result. Also we added the interaction between month and temp. So we added these interaction variables to our model, and use step() function to select a formula-based model by AIC (An Information Criterion).
+```{r}
+mod7<- mod6 %>% update(.~.+month:poly(temp,2) + month:day_of_week )%>% step(trace=FALSE,direction="both")
+summary(mod7)
+plot(mod7)
+```
+We can say that mod7 provide us better result when we compare the plots. We apply ncvTest and shapiro test to evaluate our model. For ncvTest,  null says the variance is constant. Since p is big (> 0.05), variance is constant. For shapiro test, null says standardized residuals have normal distribution. Since p is big, the residuals  seem to have normal distribution.
+```{r}
+plot(mod7, which = 3)
+car::ncvTest(mod7) 
+plot(mod7, which = 2)
+shapiro.test(rstandard(mod7)) 
+```
+We also applied k-fold cross validation.
+```{r}
+set.seed(3)
+
+# creating training data as 80% of the dataset
+random_sample <- createDataPartition(events$attend,
+								p = 0.8, list = FALSE)
+
+# generating training dataset
+# from the random_sample
+training_dataset <- events[random_sample, ]
+
+# generating testing dataset
+# from rows which are not
+# included in random_sample
+testing_dataset <- events[-random_sample, ]
+
+# Building the model
+
+# training the model by assigning sales column
+# as target variable and rest other columns
+# as independent variables
+#model <- lm(sales ~., data = training_dataset)
+model1 <- update(mod7, data = training_dataset)
+model2 <- update(mod6, data = training_dataset)
+model3 <- update(mod5, data = training_dataset)
+
+# predicting the target variable
+prediction1 <- predict(model1, testing_dataset)
+prediction2 <- predict(model2, testing_dataset)
+prediction3 <- predict(model3, testing_dataset)
+
+# computing model performance metrics
+data.frame( R2 = R2(prediction1, testing_dataset$attend),
+			RMSE = RMSE(prediction1, testing_dataset$attend),
+			MAE = MAE(prediction1, testing_dataset$attend))
+
+data.frame( R2 = R2(prediction2, testing_dataset$attend),
+			RMSE = RMSE(prediction2, testing_dataset$attend),
+			MAE = MAE(prediction2, testing_dataset$attend))
+
+data.frame( R2 = R2(prediction3, testing_dataset$attend),
+			RMSE = RMSE(prediction3, testing_dataset$attend),
+			MAE = MAE(prediction3, testing_dataset$attend))
+
+```
+When we checked the results, it contradict with our result. Here we can say that mod6 seems best one among the models. Because it has the max R2, min MAE and min RMSE. Since we do not have big enough data, this may cause a mistake.
+
+Lets check with the AIC and BIC to evaluate models that we consider to use.
+
+```{r}
+AIC(mod5, mod6, mod7)
+BIC(mod5, mod6, mod7)
+```
+They do not agree on the same model. AIC says mod7 is better while BIC suggest to use mod6.
+
+
+```{r}
+100*sigma(mod6)/median(events$attend)
+100*sigma(mod7)/median(events$attend)
+```
+We decided to move with mod7, since it has better plots when we compare with mod6. Also, it's AIC value is smaller than AIC value of mod6. 
+
+
+*We couldnt predict with the desired conditions. There was a problem about newdata parameter for the predict function. 
+
+```{r, warning = FALSE}
+#predict(object = mod7, newdata = data.frame(month = "JUN", day_of_week = "Wednesday", bobblehead = "YES"), interval = "prediction", level = 0.90)
+
+```
